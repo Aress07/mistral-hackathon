@@ -12,6 +12,8 @@ class VulnerabilityFinding(BaseModel):
     snippet: str = Field(description="The code snippet")
     description: str = Field(description="Why it is a vulnerability, including any CVEs found.")
     fix_hint: str = Field(description="How to fix it")
+    contributor: str = Field(default="Unknown", description="The GitHub contributor who wrote this vulnerable code")
+    contributor_email: str = Field(default="", description="The email of the contributor")
 
 # 2. Define the Graph State
 class AgentState(TypedDict):

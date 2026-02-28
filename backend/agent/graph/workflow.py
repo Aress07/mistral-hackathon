@@ -37,7 +37,7 @@ def analyze_chunk(state: AgentState) -> dict:
         if "MISTRAL_API_KEY" not in os.environ or os.environ["MISTRAL_API_KEY"] == "mock_key_for_test":
              raise ValueError("MISTRAL_API_KEY is not set or is still the mock key.")
             
-        llm = ChatMistralAI(model="mistral-large-latest", temperature=0)
+        llm = ChatMistralAI(model="mistral-small-latest", temperature=0)
         
         # Bind BOTH checking the CVE database and the final reporting structure as tools
         # tool_choice="any" forces the model to call AT LEAST ONE tool, ensuring it doesn't fallback to raw text.
@@ -109,10 +109,15 @@ def save_finding(state: AgentState) -> dict:
     idx = state.get("current_chunk_index", 0)
     
     if last_msg and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        chunks = state.get("parsed_chunks", [])
+        current_chunk = chunks[idx] if idx < len(chunks) else {}
+        
         for tc in last_msg.tool_calls:
             if tc["name"] == "VulnerabilityFinding":
                 try:
                     vf = VulnerabilityFinding(**tc["args"])
+                    vf.contributor = current_chunk.get("contributor", "Unknown")
+                    vf.contributor_email = current_chunk.get("contributor_email", "")
                     findings.append(vf)
                 except Exception:
                     pass
@@ -133,6 +138,62 @@ def route_after_save(state: AgentState) -> str:
         return "analyze_chunk"
     return "generate_html_report"
 
+from collections import defaultdict
+
+def notify_contributors(state: AgentState) -> dict:
+    """Uses Mistral to auto-draft a warm, helpful 'AI Peer Reviewer' email, then mocks sending it."""
+    findings = state.get("findings", [])
+    repo_url = state.get("repo_url", "local_repository")
+    repo_name = repo_url.rstrip("/").split("/")[-1]
+    
+    # Group findings sequentially by contributor (Ignore generic fallback unknowns)
+    contributors_map = defaultdict(list)
+    for f in findings:
+        name = getattr(f, "contributor", "Unknown")
+        email = getattr(f, "contributor_email", "")
+        if name != "Unknown":
+            contributors_map[(name, email)].append(f)
+            
+    if not contributors_map:
+        return {} # Exit if no known contributors
+        
+    print("\n--- Generating 'Helpful Peer' Email Notifications ---")
+    
+    for (name, email), user_findings in contributors_map.items():
+        sys_prompt = SystemMessage(content=(
+            "You are a friendly, senior AI developer advocate. Your goal is to support "
+            "your teammates by catching potential issues early so they can ship high-quality, "
+            "secure code with confidence.\n\n"
+            "Draft a helpful email to a team member about code improvements based on findings I provide. "
+            "CRITICAL EXCLUSIONS: NEVER use words like 'Vulnerability', 'Bug', 'Error', or 'Fault' in the subject line or opening. "
+            "Instead, use positive terms like 'Security Insight', 'Improvement', 'Optimization', or 'Best Practice'.\n\n"
+            "Follow this Structure Exactly:\n"
+            "Subject: 💡 AI Peer Review: Security Insight for [Repo Name]\n"
+            "Greeting: \"Hi [Name]! I'm the AI Security Assistant for the team. I was just doing a routine scan of the latest changes...\"\n"
+            "The Value Add: \"I found a small opportunity to strengthen the security of the code in [file_paths]. I've attached a detailed report with a suggested fix to save you some time!\"\n"
+            "Closing: \"Keep up the great work on this project! If you have any questions about the suggestion, I'm here to help.\"\n\n"
+            "Be supportive, professional, and extremely warm!"
+        ))
+        
+        # Summarize findings for the prompt context
+        files_mentioned = set(getattr(f, "file_path", "unknown") for f in user_findings)
+        files_str = ", ".join(list(files_mentioned)[:3]) # limit to 3 to not spam the prompt
+        if len(files_mentioned) > 3:
+            files_str += " and others"
+            
+        user_msg = HumanMessage(content=f"Draft the email for teammate '{name}'.\nRepository: {repo_name}\nFile Paths to mention: {files_str}")
+        
+        try:
+            response = llm.invoke([sys_prompt, user_msg])
+            print("\n================ EMAIL DRAFT ====================")
+            print(f"TO: {name} <{email if email else 'No Email Found'}>\n")
+            print(response.content)
+            print("=================================================\n")
+        except Exception as e:
+            print(f"Failed to generate email for {name}: {e}")
+            
+    return {}
+
 # Build the Graph
 workflow = StateGraph(AgentState)
 
@@ -143,6 +204,7 @@ workflow.add_node("analyze_chunk", analyze_chunk)
 workflow.add_node("tools", tool_node)
 workflow.add_node("save_finding", save_finding)
 workflow.add_node("generate_html_report", generate_html_report)
+workflow.add_node("notify_contributors", notify_contributors)
 
 workflow.set_entry_point("chunk_node")
 
@@ -156,7 +218,8 @@ workflow.add_conditional_edges("save_finding", route_after_save, {
     "analyze_chunk": "analyze_chunk",
     "generate_html_report": "generate_html_report"
 })
-workflow.add_edge("generate_html_report", END)
+workflow.add_edge("generate_html_report", "notify_contributors")
+workflow.add_edge("notify_contributors", END)
 
 app = workflow.compile()
 

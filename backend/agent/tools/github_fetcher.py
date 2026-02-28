@@ -44,9 +44,28 @@ def fetch_github_repo(repo_url: str) -> List[Dict[str, Any]]:
             if is_valid_ext or is_special_file:
                 try:
                     code_string = file_content.decoded_content.decode("utf-8")
+                    
+                    try:
+                        commits = repo.get_commits(path=file_content.path)
+                        if commits.totalCount > 0:
+                            latest_commit = commits[0]
+                            if latest_commit.author:
+                                contributor = latest_commit.author.login
+                            else:
+                                contributor = latest_commit.commit.author.name
+                            contributor_email = latest_commit.commit.author.email
+                        else:
+                            contributor = "Unknown"
+                            contributor_email = ""
+                    except Exception:
+                        contributor = "Unknown"
+                        contributor_email = ""
+                        
                     files_to_scan.append({
                         "file": file_content.path,
-                        "code": code_string
+                        "code": code_string,
+                        "contributor": contributor,
+                        "contributor_email": contributor_email
                     })
                 except Exception as e:
                     print(f"Skipping {file_content.path} due to decode error: {e}")

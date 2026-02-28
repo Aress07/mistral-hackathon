@@ -10,7 +10,6 @@ def chunk_code(file_info: Dict[str, Any]) -> list[Dict[str, Any]]:
     code = file_info.get("code", "")
     filename = file_info.get("file", "")
     chunks = []
-    
     # Try tree-sitter if available
     try:
         from tree_sitter import Parser
@@ -34,7 +33,9 @@ def chunk_code(file_info: Dict[str, Any]) -> list[Dict[str, Any]]:
                     "chunk_id": f"{filename}:{start}",
                     "code": text,
                     "start_line": start,
-                    "file": filename
+                    "file": filename,
+                    "contributor": file_info.get("contributor", "Unknown"),
+                    "contributor_email": file_info.get("contributor_email", "")
                 })
             for child in node.children:
                 walk(child)
@@ -58,7 +59,9 @@ def chunk_code(file_info: Dict[str, Any]) -> list[Dict[str, Any]]:
                         "chunk_id": f"{filename}:{start}",
                         "code": node_code,
                         "start_line": start,
-                        "file": filename
+                        "file": filename,
+                        "contributor": file_info.get("contributor", "Unknown"),
+                        "contributor_email": file_info.get("contributor_email", "")
                     })
             if chunks:
                 return chunks
@@ -70,7 +73,9 @@ def chunk_code(file_info: Dict[str, Any]) -> list[Dict[str, Any]]:
         "chunk_id": f"{filename}:1",
         "code": code,
         "start_line": 1,
-        "file": filename
+        "file": filename,
+        "contributor": file_info.get("contributor", "Unknown"),
+        "contributor_email": file_info.get("contributor_email", "")
     }]
 
 def chunk_node(state: dict) -> dict:
