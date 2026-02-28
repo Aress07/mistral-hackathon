@@ -1,0 +1,15 @@
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: vuln_agent_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: vuln_agent
+      POSTGRES_USER: taha
+      POSTGRES_PASSWORD: password123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

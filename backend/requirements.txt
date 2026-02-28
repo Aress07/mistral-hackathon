@@ -1,0 +1,25 @@
+# --- Web & API ---
+fastapi==0.115.*
+uvicorn==0.34.*
+pydantic==2.*
+
+# --- AI & Agentic Workflow ---
+langgraph==0.2.*
+mistralai==1.*
+langchain-mistralai==0.2.*
+
+# --- Database & Vector Search ---
+sqlmodel==0.0.22      # Wrapper around SQLAlchemy and Pydantic
+psycopg2-binary==2.9.* # PostgreSQL driver
+pgvector==0.3.* # Vector operations for Postgres
+
+# --- Parsing (AST) ---
+tree-sitter==0.23.*
+tree-sitter-language-pack==0.2.*
+
+# --- Integrations ---
+PyGithub==2.5.*
+slack_bolt==1.22.*
+google-api-python-client==2.160.*
+google-auth-httplib2==0.2.*
+google-auth-oauthlib==1.2.*
