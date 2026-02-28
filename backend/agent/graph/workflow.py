@@ -52,7 +52,7 @@ def analyze_chunk(state: AgentState) -> dict:
                     
         new_messages = []
         if needs_prompt:
-            sys_msg = SystemMessage(content="You are an AI Vulnerability Analyzer. You have access to the check_cve_database tool. If the code mentions or imports ANY specific libraries (like django), you MUST call check_cve_database FIRST to check for known vulnerabilities. Do NOT guess. After you have received the CVE results from the tool, ONLY THEN should you call the VulnerabilityFinding tool to summarize your final report. Do not reply with regular text.")
+            sys_msg = SystemMessage(content="You are an AI Vulnerability Analyzer. You have access to the check_cve_database tool. If the code mentions or imports ANY specific libraries (like django), you MUST call check_cve_database FIRST to check for known vulnerabilities. Do NOT guess. After you have received the CVE results from the tool, ONLY THEN should you report findings. CRITICAL: If you find multiple distinct vulnerabilities (e.g., a critical code injection AND a vulnerable dependency from the CVE check), you MUST call the VulnerabilityFinding tool MULTIPLE TIMES, exactly once for each distinct finding. Do not combine them into one finding. Do not reply with regular text.")
             human_msg = HumanMessage(content=f"Analyze this chunk of code:\n\n{chunk['code']}")
             new_messages.extend([sys_msg, human_msg])
             
@@ -154,10 +154,185 @@ app = workflow.compile()
 if __name__ == "__main__":
     # Test execution
     test_code = '''
-import django==1.11
+import os
+import sqlite3
+import hashlib
+import subprocess
+import pickle
+import jwt
+import requests
+from flask import Flask, request, jsonify
 
-def main():
-    print("Running vulnerable django app")
+app = Flask(__name__)
+
+SECRET_KEY = "hardcoded_super_secret"
+DATABASE = "users.db"
+
+
+class DatabaseManager:
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+    def connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def get_user(self, username):
+        conn = self.connect()
+        cursor = conn.cursor()
+        query = f"SELECT * FROM users WHERE username = '{username}'"
+        cursor.execute(query)
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def create_user(self, username, password):
+        conn = self.connect()
+        cursor = conn.cursor()
+        hashed = hashlib.md5(password.encode()).hexdigest()
+        cursor.execute(
+            "INSERT INTO users (username, password) VALUES (?, ?)",
+            (username, hashed),
+        )
+        conn.commit()
+        conn.close()
+
+
+class AuthService:
+    def __init__(self, db: DatabaseManager):
+        self.db = db
+
+    def login(self, username, password):
+        user = self.db.get_user(username)
+        if not user:
+            return None
+
+        hashed = hashlib.md5(password.encode()).hexdigest()
+        if hashed == user[1]:
+            token = jwt.encode({"user": username}, SECRET_KEY, algorithm="HS256")
+            return token
+        return None
+
+    def verify_token(self, token):
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            return payload["user"]
+        except Exception:
+            return None
+
+
+class FileProcessor:
+    def __init__(self, upload_folder="uploads"):
+        self.upload_folder = upload_folder
+        os.makedirs(self.upload_folder, exist_ok=True)
+
+    def save_file(self, file_storage):
+        filename = file_storage.filename
+        path = os.path.join(self.upload_folder, filename)
+        file_storage.save(path)
+        return path
+
+    def process_file(self, filepath):
+        with open(filepath, "rb") as f:
+            data = pickle.load(f)
+        return data
+
+
+class AdminUtils:
+    @staticmethod
+    def run_diagnostic(command):
+        result = subprocess.check_output(command, shell=True)
+        return result.decode()
+
+
+def fetch_external_profile(url):
+    response = requests.get(url)
+    return response.json()
+
+
+def generate_reset_token(email):
+    raw = email + SECRET_KEY
+    return hashlib.sha1(raw.encode()).hexdigest()
+
+
+@app.route("/login", methods=["POST"])
+def login_route():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+
+    db = DatabaseManager(DATABASE)
+    auth = AuthService(db)
+
+    token = auth.login(username, password)
+    if token:
+        return jsonify({"token": token})
+    return jsonify({"error": "Invalid credentials"}), 401
+
+
+@app.route("/upload", methods=["POST"])
+def upload_route():
+    file = request.files["file"]
+    processor = FileProcessor()
+    path = processor.save_file(file)
+    content = processor.process_file(path)
+    return jsonify({"status": "processed", "content": str(content)})
+
+
+@app.route("/admin/exec", methods=["POST"])
+def admin_exec():
+    token = request.headers.get("Authorization")
+    if not token:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    auth = AuthService(DatabaseManager(DATABASE))
+    user = auth.verify_token(token)
+
+    if user != "admin":
+        return jsonify({"error": "Forbidden"}), 403
+
+    command = request.json.get("command")
+    output = AdminUtils.run_diagnostic(command)
+    return jsonify({"output": output})
+
+
+@app.route("/profile")
+def profile_route():
+    url = request.args.get("url")
+    data = fetch_external_profile(url)
+    return jsonify(data)
+
+
+@app.route("/reset-password", methods=["POST"])
+def reset_password():
+    email = request.json.get("email")
+    token = generate_reset_token(email)
+    return jsonify({"reset_token": token})
+
+
+def initialize_database():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT,
+            password TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def seed_admin():
+    db = DatabaseManager(DATABASE)
+    db.create_user("admin", "admin123")
+
+
+if __name__ == "__main__":
+    initialize_database()
+    seed_admin()
+    app.run(debug=True)
     '''
     initial_state = {
         "files_to_scan": [{"file": "test.py", "code": test_code}],
