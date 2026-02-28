@@ -316,10 +316,15 @@ def generate_html_report(state: AgentState) -> dict:
 </html>
 """
 
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     filename = f"{repo_name}_{date_str}.html"
 
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    # Directory math: backend/agent/graph -> ../../../ equals the mistral-hackathon root folder
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../reports"))
+    
+    # Create the reports directory if it doesn't already exist
+    os.makedirs(root_dir, exist_ok=True)
+    
     report_path = os.path.join(root_dir, filename)
     
     with open(report_path, "w", encoding="utf-8") as f:

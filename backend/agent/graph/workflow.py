@@ -64,10 +64,23 @@ def analyze_chunk(state: AgentState) -> dict:
             new_messages.extend([sys_msg, human_msg])
             
         invocation_messages = messages + new_messages
-        result = llm_with_tools.invoke(invocation_messages)
-        new_messages.append(result)
         
-        return {"messages": new_messages}
+        import time
+        max_retries = 5
+        base_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                result = llm_with_tools.invoke(invocation_messages)
+                new_messages.append(result)
+                return {"messages": new_messages}
+            except Exception as inner_e:
+                if "429" in str(inner_e) or "rate_limit" in str(inner_e).lower() or "1300" in str(inner_e):
+                    if attempt < max_retries - 1:
+                        wait_time = base_delay * (2 ** attempt)
+                        time.sleep(wait_time)
+                        continue
+                raise inner_e
             
     except Exception as e:
         print(f"--- ERROR DURING API INVOCATION ---")
@@ -138,61 +151,6 @@ def route_after_save(state: AgentState) -> str:
         return "analyze_chunk"
     return "generate_html_report"
 
-from collections import defaultdict
-
-def notify_contributors(state: AgentState) -> dict:
-    """Uses Mistral to auto-draft a warm, helpful 'AI Peer Reviewer' email, then mocks sending it."""
-    findings = state.get("findings", [])
-    repo_url = state.get("repo_url", "local_repository")
-    repo_name = repo_url.rstrip("/").split("/")[-1]
-    
-    # Group findings sequentially by contributor (Ignore generic fallback unknowns)
-    contributors_map = defaultdict(list)
-    for f in findings:
-        name = getattr(f, "contributor", "Unknown")
-        email = getattr(f, "contributor_email", "")
-        if name != "Unknown":
-            contributors_map[(name, email)].append(f)
-            
-    if not contributors_map:
-        return {} # Exit if no known contributors
-        
-    print("\n--- Generating 'Helpful Peer' Email Notifications ---")
-    
-    for (name, email), user_findings in contributors_map.items():
-        sys_prompt = SystemMessage(content=(
-            "You are a friendly, senior AI developer advocate. Your goal is to support "
-            "your teammates by catching potential issues early so they can ship high-quality, "
-            "secure code with confidence.\n\n"
-            "Draft a helpful email to a team member about code improvements based on findings I provide. "
-            "CRITICAL EXCLUSIONS: NEVER use words like 'Vulnerability', 'Bug', 'Error', or 'Fault' in the subject line or opening. "
-            "Instead, use positive terms like 'Security Insight', 'Improvement', 'Optimization', or 'Best Practice'.\n\n"
-            "Follow this Structure Exactly:\n"
-            "Subject: 💡 AI Peer Review: Security Insight for [Repo Name]\n"
-            "Greeting: \"Hi [Name]! I'm the AI Security Assistant for the team. I was just doing a routine scan of the latest changes...\"\n"
-            "The Value Add: \"I found a small opportunity to strengthen the security of the code in [file_paths]. I've attached a detailed report with a suggested fix to save you some time!\"\n"
-            "Closing: \"Keep up the great work on this project! If you have any questions about the suggestion, I'm here to help.\"\n\n"
-            "Be supportive, professional, and extremely warm!"
-        ))
-        
-        # Summarize findings for the prompt context
-        files_mentioned = set(getattr(f, "file_path", "unknown") for f in user_findings)
-        files_str = ", ".join(list(files_mentioned)[:3]) # limit to 3 to not spam the prompt
-        if len(files_mentioned) > 3:
-            files_str += " and others"
-            
-        user_msg = HumanMessage(content=f"Draft the email for teammate '{name}'.\nRepository: {repo_name}\nFile Paths to mention: {files_str}")
-        
-        try:
-            response = llm.invoke([sys_prompt, user_msg])
-            print("\n================ EMAIL DRAFT ====================")
-            print(f"TO: {name} <{email if email else 'No Email Found'}>\n")
-            print(response.content)
-            print("=================================================\n")
-        except Exception as e:
-            print(f"Failed to generate email for {name}: {e}")
-            
-    return {}
 
 # Build the Graph
 workflow = StateGraph(AgentState)
@@ -204,7 +162,6 @@ workflow.add_node("analyze_chunk", analyze_chunk)
 workflow.add_node("tools", tool_node)
 workflow.add_node("save_finding", save_finding)
 workflow.add_node("generate_html_report", generate_html_report)
-workflow.add_node("notify_contributors", notify_contributors)
 
 workflow.set_entry_point("chunk_node")
 
@@ -218,8 +175,7 @@ workflow.add_conditional_edges("save_finding", route_after_save, {
     "analyze_chunk": "analyze_chunk",
     "generate_html_report": "generate_html_report"
 })
-workflow.add_edge("generate_html_report", "notify_contributors")
-workflow.add_edge("notify_contributors", END)
+workflow.add_edge("generate_html_report", END)
 
 app = workflow.compile()
 
@@ -227,7 +183,7 @@ from backend.agent.tools.github_fetcher import fetch_github_repo
 
 if __name__ == "__main__":
     # Test execution against a very small GitHub directory
-    repo_url = "https://github.com/Aress07/Text-Mining"
+    repo_url = "https://github.com/Aress07/mistral-hackathon"
     
     print(f"Fetching repository files from {repo_url}...")
     try:
