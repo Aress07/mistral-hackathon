@@ -10,8 +10,11 @@ class VulnerabilityFinding(BaseModel):
     file_path: str = Field(description="The full path to the file from the repo root, e.g., '/backend/app/main.py'")
     line_number: int = Field(description="Exact line number")
     snippet: str = Field(description="The code snippet")
-    description: str = Field(description="Why it is a vulnerability, including any CVEs found.")
-    fix_hint: str = Field(description="How to fix it")
+    verdict: str = Field(description="'True Positive' or 'False Positive'")
+    exploit_scenario: str = Field(description="A plain-English exploit scenario specific to this codebase")
+    false_positive_rationale: str = Field(default="", description="Rationale if the finding is a false positive")
+    fix: str = Field(description="A concrete, copy-paste-ready code fix")
+    source: str = Field(description="'SAST-flagged', 'LLM-detected', or 'CVE-matched'")
     contributor: str = Field(default="Unknown", description="The GitHub contributor who wrote this vulnerable code")
     contributor_email: str = Field(default="", description="The email of the contributor")
 
@@ -21,6 +24,9 @@ class AgentState(TypedDict):
     repo_url: str
     files_to_scan: List[Dict[str, Any]] # e.g., [{"file": "main.py", "code": "..."}]
     parsed_chunks: List[Dict[str, Any]] # The Tree-sitter chunks
+    
+    # SAST scan results
+    sast_findings: List[Dict[str, Any]]
     
     # AI Analysis progress
     current_chunk_index: int

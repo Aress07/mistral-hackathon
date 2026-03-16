@@ -16,13 +16,28 @@ from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage
 from backend.agent.graph.state import AgentState, VulnerabilityFinding
 from backend.agent.parser.chunker import chunk_node
 from backend.agent.tools.security_tools import check_cve_database
+from backend.agent.tools.sast_scanner import run_semgrep_scan
 from backend.agent.graph.report_gen import generate_html_report
 
 from langchain_mistralai import ChatMistralAI
 
+def run_sast_scan(state: AgentState) -> dict:
+    """
+    LangGraph node: Runs the deterministic Semgrep SAST scanner on the fetched files
+    before the LLM begins its chunk-by-chunk analysis.
+    """
+    files = state.get("files_to_scan", [])
+    
+    # Run the scanner
+    findings = run_semgrep_scan(files)
+    
+    return {
+        "sast_findings": findings
+    }
+
 def analyze_chunk(state: AgentState) -> dict:
     """
-    LangGraph node that uses Mistral to analyze code and optionally call tools.
+    LangGraph node that uses Mistral to triage SAST findings and discover logic flaws.
     """
     chunks = state.get("parsed_chunks", [])
     idx = state.get("current_chunk_index", 0)
@@ -53,15 +68,44 @@ def analyze_chunk(state: AgentState) -> dict:
                     
         new_messages = []
         if needs_prompt:
-            sys_msg = SystemMessage(content="You are an AI Vulnerability Analyzer. You have access to the check_cve_database tool. If the code mentions or imports ANY specific libraries (like django), you MUST call check_cve_database FIRST to check for known vulnerabilities. Do NOT guess. After you have received the CVE results from the tool, ONLY THEN should you report findings. CRITICAL: If you find multiple distinct vulnerabilities (e.g., a critical code injection AND a vulnerable dependency from the CVE check), you MUST call the VulnerabilityFinding tool MULTIPLE TIMES, exactly once for each distinct finding. Do not combine them into one finding. You must include the full file path for every finding you detect. I will provide the filename in the context below. Do not reply with regular text.")
-            
-            # Format the file path with a leading slash to ensure consistency
+            # Gather any SAST findings relevant to this specific file
             file_path = chunk.get('file', 'unknown')
             if not file_path.startswith('/'):
                 file_path = f"/{file_path}"
                 
-            human_msg = HumanMessage(content=f"File: {file_path}\nCode:\n{chunk['code']}")
+            sast_findings = state.get("sast_findings", [])
+            # Make comparison agnostic to leading slashes
+            clean_chunk_path = chunk.get('file', 'unknown').lstrip('/')
+            relevant_sast = [f for f in sast_findings if f.get("file_path", "").lstrip('/') == clean_chunk_path]
+            
+            sast_context = ""
+            if relevant_sast:
+                sast_context = "### SAST FINDINGS FOR THIS FILE ###\nThe following vulnerabilities were flagged by a deterministic SAST tool (Semgrep) for this file. Evaluate them:\n"
+                for i, sf in enumerate(relevant_sast):
+                    sast_context += f"[{i+1}] Line {sf['line_number']} (Severity: {sf['severity'].upper()}): {sf['type']} - {sf['description']}\n"
+                    if sf['snippet']:
+                        sast_context += f"Code:\n{sf['snippet']}\n"
+            else:
+                sast_context = "### SAST FINDINGS FOR THIS FILE ###\nNo deterministic SAST findings for this file.\n"
+
+            sys_msg = SystemMessage(content=f"""You are an expert AI Vulnerability Triage Agent. 
+
+{sast_context}
+
+YOUR INSTRUCTIONS:
+1. PHASE 2a (SAST Triage): If there are SAST findings above, examine them in the context of the provided code chunk. Is each finding a 'True Positive' or a 'False Positive'? (e.g. is the input sanitized nearby?). If True Positive, provide a plain-English exploit scenario specific to this codebase and a concrete fix. Set `source` to 'SAST-flagged'.
+2. PHASE 2b (Business Logic): Analyze the code for business logic flaws (access control, role validation, etc.) that SAST cannot see. If found, set `source` to 'LLM-detected'.
+3. PHASE 2c (Dependency Check): If the code imports specific libraries, use the `check_cve_database` tool FIRST. If vulnerable, set `source` to 'CVE-matched'.
+
+CRITICAL RULES:
+- If you find a true positive (from any phase), you MUST call the VulnerabilityFinding tool EXACTLY ONCE for each distinct finding. Do not combine them.
+- File Path required: Provide the full file path ({file_path}) for every finding.
+- Do not reply with regular text. Only call tools.
+""")
+                
+            human_msg = HumanMessage(content=f"Code snippet to analyze:\n{chunk['code']}")
             new_messages.extend([sys_msg, human_msg])
+
             
         invocation_messages = messages + new_messages
         
@@ -149,22 +193,27 @@ def route_after_save(state: AgentState) -> str:
     chunks = state.get("parsed_chunks", [])
     if idx < len(chunks):
         return "analyze_chunk"
-    return "generate_html_report"
+    return "apply_post_scan_fixes"
 
+
+from backend.agent.graph.post_processor import apply_post_scan_fixes
 
 # Build the Graph
 workflow = StateGraph(AgentState)
 
 tool_node = ToolNode([check_cve_database])
 
+workflow.add_node("run_sast_scan", run_sast_scan)
 workflow.add_node("chunk_node", chunk_node)
 workflow.add_node("analyze_chunk", analyze_chunk)
 workflow.add_node("tools", tool_node)
 workflow.add_node("save_finding", save_finding)
+workflow.add_node("apply_post_scan_fixes", apply_post_scan_fixes)
 workflow.add_node("generate_html_report", generate_html_report)
 
-workflow.set_entry_point("chunk_node")
+workflow.set_entry_point("run_sast_scan")
 
+workflow.add_edge("run_sast_scan", "chunk_node")
 workflow.add_edge("chunk_node", "analyze_chunk")
 workflow.add_conditional_edges("analyze_chunk", should_continue, {
     "save_finding": "save_finding",
@@ -173,24 +222,25 @@ workflow.add_conditional_edges("analyze_chunk", should_continue, {
 workflow.add_edge("tools", "analyze_chunk")
 workflow.add_conditional_edges("save_finding", route_after_save, {
     "analyze_chunk": "analyze_chunk",
-    "generate_html_report": "generate_html_report"
+    "apply_post_scan_fixes": "apply_post_scan_fixes"
 })
+workflow.add_edge("apply_post_scan_fixes", "generate_html_report")
 workflow.add_edge("generate_html_report", END)
 
 app = workflow.compile()
 
-from backend.agent.tools.github_fetcher import fetch_github_repo
+from backend.agent.tools.local_fetcher import fetch_local_repo
 
 if __name__ == "__main__":
-    # Test execution against a very small GitHub directory
-    repo_url = "https://github.com/Aress07/mistral-hackathon"
+    # Test execution against the local directory to avoid rate limits
+    repo_url = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
     
-    print(f"Fetching repository files from {repo_url}...")
+    print(f"Fetching repository files locally from {repo_url}...")
     try:
-        scannable_files = fetch_github_repo(repo_url)
+        scannable_files = fetch_local_repo(repo_url)
         print(f"Found {len(scannable_files)} files to scan.")
     except Exception as e:
-        print(f"Failed to fetch repo: {e}")
+        print(f"Failed to fetch local repo: {e}")
         scannable_files = []
         
     initial_state = {
@@ -213,8 +263,8 @@ if __name__ == "__main__":
         
         for i, f in enumerate(result['findings']):
             if hasattr(f, 'severity'):
-                print(f"\n[{f.severity.upper()}] Finding #{i+1}: {f.type} at line {f.line_number}:\n{f.description}")
+                print(f"\n[{f.severity.upper()}] Finding #{i+1}: {f.type} at line {f.line_number}:\n{f.exploit_scenario}")
             else:
-                print(f"\n[{f.get('severity', 'high').upper()}] Finding #{i+1}: {f.get('type', 'Unknown')} at line {f.get('line_number', 0)}:\n{f.get('description', '')}")
+                print(f"\n[{f.get('severity', 'high').upper()}] Finding #{i+1}: {f.get('type', 'Unknown')} at line {f.get('line_number', 0)}:\n{f.get('exploit_scenario', '')}")
     else:
         print("No files to scan. Exiting.")

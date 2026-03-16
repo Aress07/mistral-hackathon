@@ -19,9 +19,23 @@ def check_cve_database(package_name: str, version: str) -> str:
         data = response.json()
         
         if "vulns" in data:
-            vuln_ids = [v["id"] for v in data["vulns"]]
-            return f"Found {len(data['vulns'])} known vulnerabilities for {package_name}@{version} in OSV database: {', '.join(vuln_ids)}."
-        return f"No known vulnerabilities found for {package_name}@{version}."
+            cve_ids = set()
+            for v in data["vulns"]:
+                # OSV often lists CVEs in the aliases array
+                aliases = v.get("aliases", [])
+                for a in aliases:
+                    if a.startswith("CVE-"):
+                        cve_ids.add(a)
+                # If no CVE alias but we have a GHSA or PYSEC ID, we can optionally use that
+                if not cve_ids:
+                    cve_ids.add(v["id"])
+                    
+            if cve_ids:
+                return f"Found {len(data['vulns'])} known vulnerabilities for {package_name}@{version} in OSV database: {', '.join(cve_ids)}. Include these precise CVE IDs exactly in your Exploit Scenario text."
+            
+            return f"Found {len(data['vulns'])} vulnerabilities, but no explicit CVE IDs found."
+            
+        return f"No known vulnerabilities found for {package_name}@{version}. (Make sure that if you flag it anyway, note that it is unbacked by OSV)"
         
     except Exception as e:
-        return f"Error querying OSV API: {e}. (Mock result: found 2 critical CVEs for {package_name} {version}.)"
+        return f"Error querying OSV API: {e}. No CVEs could be retrieved."

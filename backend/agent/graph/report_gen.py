@@ -1,4 +1,5 @@
 import os
+import markdown
 from datetime import datetime
 from backend.agent.graph.state import AgentState
 
@@ -10,10 +11,10 @@ def generate_html_report(state: AgentState) -> dict:
     files_to_scan = state.get("files_to_scan", [])
     repo_url = state.get("repo_url", "")
     
-    # Extract the repository name from the URL, or default to "local_scan"
+    # Extract the repository name from the URL safely, or default to "local_scan"
     repo_name = "local_scan"
     if repo_url:
-        repo_name = repo_url.rstrip("/").split("/")[-1]
+        repo_name = os.path.basename(os.path.normpath(repo_url))
     
     total_files = len(files_to_scan)
     total_findings = len(findings)
@@ -142,6 +143,12 @@ def generate_html_report(state: AgentState) -> dict:
         .finding-card.sev-medium {{ border-left-color: var(--medium); }}
         .finding-card.sev-low {{ border-left-color: var(--low); }}
 
+        .finding-card.fp-true {{
+            opacity: 0.7;
+            border-left-color: #64748b;
+            background: #0f172a;
+        }}
+
         .finding-header {{
             display: flex;
             justify-content: space-between;
@@ -167,11 +174,18 @@ def generate_html_report(state: AgentState) -> dict:
         .badge-high {{ background: rgba(255,140,0,0.15); color: var(--high); border: 1px solid var(--high); }}
         .badge-medium {{ background: rgba(255,215,0,0.15); color: var(--medium); border: 1px solid var(--medium); }}
         .badge-low {{ background: rgba(30,144,255,0.15); color: var(--low); border: 1px solid var(--low); }}
+        
+        .badge-tp {{ background: rgba(239,68,68,0.2); color: #fca5a5; border: 1px solid #ef4444; }}
+        .badge-fp {{ background: rgba(34,197,94,0.2); color: #86efac; border: 1px solid #22c55e; }}
+        .badge-source {{ background: #334155; color: #cbd5e1; border: 1px solid #475569; }}
 
         .finding-meta {{
             font-size: 0.85rem;
             color: var(--text-muted);
             margin-bottom: 1rem;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
         }}
 
         .finding-desc {{
@@ -268,10 +282,22 @@ def generate_html_report(state: AgentState) -> dict:
             sev = f.severity.lower() if hasattr(f, 'severity') else f.get("severity", "low").lower()
             title = f.type if hasattr(f, 'type') else f.get("type", "Unknown Vulnerability")
             line = f.line_number if hasattr(f, 'line_number') else f.get("line_number", 0)
-            desc = f.description if hasattr(f, 'description') else f.get("description", "")
             snippet = f.snippet if hasattr(f, 'snippet') else f.get("snippet", "")
-            fix = f.fix_hint if hasattr(f, 'fix_hint') else f.get("fix_hint", "")
             file_path = f.file_path if hasattr(f, 'file_path') else f.get("file_path", "Unknown File")
+            
+            # Additional Context fields
+            verdict = f.verdict if hasattr(f, 'verdict') else f.get("verdict", "True Positive")
+            
+            exploit_scenario = f.exploit_scenario if hasattr(f, 'exploit_scenario') else f.get("exploit_scenario", "")
+            if exploit_scenario:
+                exploit_scenario = markdown.markdown(exploit_scenario, extensions=['fenced_code', 'tables'])
+                
+            fix = f.fix if hasattr(f, 'fix') else f.get("fix", "")
+            if fix:
+                fix = markdown.markdown(fix, extensions=['fenced_code', 'tables'])
+                
+            source = f.source if hasattr(f, 'source') else f.get("source", "Unknown")
+            contributor = f.contributor if hasattr(f, 'contributor') else f.get("contributor", "Unknown")
             
             # format the file path to ensure it has leading slash
             if not file_path.startswith('/'):
@@ -281,14 +307,33 @@ def generate_html_report(state: AgentState) -> dict:
             if sev not in ['critical', 'high', 'medium', 'low']:
                 sev = 'low'
                 
+            is_fp = verdict.lower() == "false positive"
+            card_class = f"finding-card sev-{sev}" + (" fp-true" if is_fp else "")
+            verdict_badge = "badge-fp" if is_fp else "badge-tp"
+                
             html_content += f"""
-            <div class="finding-card sev-{sev}">
+            <div class="{card_class}">
                 <div class="finding-header">
                     <h3 class="finding-title" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">{file_path} : Line {line}</h3>
-                    <span class="badge badge-{sev}">{sev.upper()}</span>
+                    <div>
+                        <span class="badge {verdict_badge}">{verdict.upper()}</span>
+                        <span class="badge badge-{sev}">{sev.upper()}</span>
+                    </div>
                 </div>
-                <div class="finding-meta"><strong>Vulnerability:</strong> {title}</div>
-                <div class="finding-desc">{desc}</div>
+                <div class="finding-meta">
+                    <span><strong>Vulnerability:</strong> {title}</span>
+                    <span><span class="badge badge-source">{source}</span></span>
+                    <span><strong>Contributor:</strong> {contributor}</span>
+                </div>
+                """
+                
+            if exploit_scenario and not is_fp:
+                html_content += f"""
+                <div class="finding-desc"><strong>Exploit Scenario:</strong><br/>{exploit_scenario}</div>
+                """
+            elif exploit_scenario and is_fp:
+                 html_content += f"""
+                <div class="finding-desc"><strong>False Positive Rationale:</strong><br/>{exploit_scenario}</div>
                 """
                 
             if snippet:
@@ -301,7 +346,7 @@ def generate_html_report(state: AgentState) -> dict:
                 html_content += f"""
                 <div class="fix-hint">
                     <h4>Recommended Fix</h4>
-                    <p>{fix}</p>
+                    <div class="markdown-content">{fix}</div>
                 </div>
                 """
                 
